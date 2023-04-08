@@ -3,53 +3,53 @@ package com.softwaremill.diffx
 import com.softwaremill.diffx.ObjectMatcher.{MapEntry, SeqEntry, SetEntry}
 import com.softwaremill.diffx.instances._
 
-trait Diff[T] extends DiffMacro[T] { outer =>
-  def apply(left: T, right: T): DiffResult = apply(left, right, DiffContext.Empty)
-  def apply(left: T, right: T, context: DiffContext): DiffResult
+trait Diff[T] extends DiffMacro[T] {
+  def apply(left: T, right: T): DiffResult
 
-  def contramap[R](f: R => T): Diff[R] =
-    (left: R, right: R, context: DiffContext) => {
-      outer(f(left), f(right), context)
+  /** Attempt to change the configuration of this Diff. If successful, a new differ with the updated configuration will
+    * be returned.
+    *
+    * The configuration change can fail due to
+    *   - bad "path" that does not match the internal structure of the Diff
+    *   - The path resolved correctly, but the configuration update operation cannot be applied for that part of the
+    *     Diff (e.g. wrong type or wrong operation)
+    *
+    * @param path
+    *   The path to traverse to the sub-Diff
+    * @param operation
+    *   The configuration change operation you want to perform on the target sub-Diff
+    */
+  final def configureRaw(path: ConfigurePath, operation: ConfigureOp): Either[ConfigureError, Diff[T]] = {
+    (path.unresolvedSteps, operation) match {
+      case (step :: tail, op) => configurePath(step, ConfigurePath(path.resolvedSteps :+ step, tail), op)
+      case (Nil, ConfigureOp.SetIgnored(newIgnored)) => Right(configureIgnored(newIgnored))
+      case (Nil, pairByOp: ConfigureOp.PairBy[_])    => configurePairBy(path, pairByOp)
+      case (Nil, op: ConfigureOp.TransformDiff[_])   => Right(configureTransform(op))
     }
+  }
 
-  def modifyUnsafe[U](path: ModifyPath*)(mod: Diff[U] => Diff[U]): Diff[T] =
-    new Diff[T] {
-      override def apply(left: T, right: T, context: DiffContext): DiffResult =
-        outer.apply(
-          left,
-          right,
-          context.merge(
-            DiffContext.atPath(path.toList, mod.asInstanceOf[Diff[Any] => Diff[Any]])
-          )
-        )
-    }
+  protected def configureIgnored(newIgnored: Boolean): Diff[T]
 
-  def modifyMatcherUnsafe(path: ModifyPath*)(matcher: ObjectMatcher[_]): Diff[T] =
-    new Diff[T] {
-      override def apply(left: T, right: T, context: DiffContext): DiffResult =
-        outer.apply(
-          left,
-          right,
-          context.merge(DiffContext.atPath(path.toList, matcher))
-        )
-    }
+  protected def configurePath(step: String, nextPath: ConfigurePath, op: ConfigureOp): Either[ConfigureError, Diff[T]]
+
+  protected def configurePairBy(path: ConfigurePath, op: ConfigureOp.PairBy[_]): Either[ConfigureError, Diff[T]]
+
+  final private def configureTransform(
+      op: ConfigureOp.TransformDiff[_]
+  ): Diff[T] = {
+    op.unsafeCastFunc[T].apply(this)
+  }
 }
 
 object Diff extends LowPriorityDiff with DiffTupleInstances with DiffxPlatformExtensions with DiffCompanionMacro {
   def apply[T: Diff]: Diff[T] = implicitly[Diff[T]]
 
-  def ignored[T]: Diff[T] = (_: T, _: T, _: DiffContext) => DiffResult.Ignored
+  // def ignored[T]: Diff[T] = (_: T, _: T, _: DiffContext) => DiffResult.Ignored
 
   def compare[T: Diff](left: T, right: T): DiffResult = apply[T].apply(left, right)
 
   /** Create a Diff instance using [[Object#equals]] */
-  def useEquals[T]: Diff[T] = (left: T, right: T, _: DiffContext) => {
-    if (left != right) {
-      DiffResultValue(left, right)
-    } else {
-      IdenticalValue(left)
-    }
-  }
+  def useEquals[T]: Diff[T] = new DiffEquals[T](isIgnored = false, _.toString)
 
   def approximate[T: Numeric](epsilon: T): Diff[T] =
     new ApproximateDiffForNumeric[T](epsilon)
